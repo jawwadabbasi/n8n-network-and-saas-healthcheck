@@ -1,0 +1,381 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "\ntargets = [\n    {\"name\": \"Internal Batman\", \"ip\": \"127.0.0.1\", \"ports\": [389, 636]},\n    {\"name\": \"Internal GitLab\", \"ip\": \"127.0.0.2\", \"ports\": [443]},\n]\n\nresults = []\n\nfor t in targets:\n    for port in t[\"ports\"]:\n        results.append({\n            \"name\": t[\"name\"],\n            \"ip\": t[\"ip\"],\n            \"port\": port\n        })\n\nreturn results"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        80
+      ],
+      "id": "30ff0495-28b4-4ddd-9873-ae4d9283c8d2",
+      "name": "On-Prem IP/Port Connectivity",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "return [\n    {\n        \"name\": \"PagerDuty - OAuth Test\",\n        \"method\": \"GET\",\n        \"url\": \"https://api.pagerduty.com/users/XXXXXX/contact_methods/XXXXXX\",\n        \"headers\": {\n            \"Authorization\": \"Token token=[YOUR_API_TOKEN]\",\n            \"Accept\": \"application/vnd.pagerduty+json;version=2\"\n        },\n        \"body\": \"\",\n        \"display_results\": \"full\",\n        \"proxy\": \"http://127.0.0.1:8080\",\n    },\n    {\n        \"name\": \"Batman Portal\",\n        \"method\": \"GET\",\n        \"url\": \"https://batman-portal.com\",\n        \"headers\": {},\n        \"body\": \"\",\n        \"display_results\": \"status_code\",\n        \"proxy\": \"\",\n    },\n]"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -304,
+        -112
+      ],
+      "id": "305e4b1d-3ddc-48b8-98df-bc4061e32cef",
+      "name": "SaaS/API Connectivity"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        832,
+        -16
+      ],
+      "id": "5a65f886-e25c-4034-a17a-3d15d67ce292",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "results = []\n\nERROR_KEYS = [\"error\", \"errors\", \"error_message\", \"error_description\"]\nNEGATIVE_STATUS = [\"error\", \"failed\", \"fail\", \"denied\", \"forbidden\", \"unauthorized\"]\n\nfor item in _input.all():\n    data = item.json or {}\n\n    name = data.get(\"name\", \"Unknown\")\n    url = data.get(\"url\", \"Unknown\")\n    response = data.get(\"results\") or data.get(\"result\") or {}\n    http_status = data.get(\"results\", {}).get(\"statusCode\", {})\n    display_results = data.get(\"display_results\", \"full\")\n    headers = data.get(\"results\", {}).get(\"headers\", {})\n\n    # -------------------------------\n    # SUCCESS / FAILURE DETECTION\n    # -------------------------------\n    success = True\n    error_message = None\n\n    # Rule 1: n8n HTTP error\n    if data.get(\"error\") or data.get(\"errorMessage\"):\n        success = False\n        error_message = data.get(\"error\") or data.get(\"errorMessage\")\n\n    # Rule 2: HTTP status code\n    if isinstance(http_status, int) and http_status >= 400:\n        success = False\n        error_message = f\"HTTP {http_status}\"\n\n    # Rule 3: Look for explicit API error fields\n    for key in ERROR_KEYS:\n        if key in response:\n            success = False\n            error_message = response.get(key)\n\n    # Rule 4: Known failure patterns\n    status_field = str(response.get(\"status\", \"\")).lower()\n    if status_field in NEGATIVE_STATUS:\n        success = False\n        error_message = response.get(\"status\")\n\n    # Rule 5: Some APIs send \"success\": false\n    if response.get(\"success\") is False:\n        success = False\n        error_message = \"success = false\"\n\n    # Rule 6: Empty response\n    if not response:\n        success = False\n        error_message = \"Empty response\"\n\n    if display_results == \"full\":\n        final_response = response\n\n    elif display_results == \"headers\":\n        final_response = {\"headers\": headers}\n\n    elif display_results == \"status_code\":\n        final_response = {\"statusCode\": http_status}\n\n    results.append({\n        \"name\": name,\n        \"url\": url,\n        \"success\": success,\n        \"error\": None if success else error_message,\n        \"response\": final_response,\n    })\n\nreturn {\"api_responses\": results}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        -112
+      ],
+      "id": "95b2355e-ac8c-4033-8a8a-334a752dc4df",
+      "name": "Summarise API Response"
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "results = []\n\nfor item in items:\n    stdout = item.get(\"json\", {}).get(\"stdout\", \"\") or \"\"\n    stderr = item.get(\"json\", {}).get(\"stderr\", \"\") or \"\"\n\n    # Support structured input OR flattened input\n    info = item.get(\"json\", {}).get(\"item\", item.get(\"json\", {}))\n\n    name = info.get(\"name\", \"Unknown\")\n    ip = info.get(\"ip\", \"Unknown\")\n    port = info.get(\"port\", \"Unknown\")\n\n    # Determine status using stderr checks\n    if (\"succeeded\" in stderr) or (\"open\" in stderr):\n        status = \"OPEN\"\n    else:\n        status = \"CLOSED\"\n\n    results.append({\n        \"name\": name,\n        \"ip\": ip,\n        \"port\": port,\n        \"status\": status\n    })\n\nreturn {\"port_results\": results}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        80
+      ],
+      "id": "3a0e6f85-e465-496b-81e5-35923d95ab41",
+      "name": "Summarise Connectivity Response"
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=nc -zvnw 3 {{$json[\"ip\"]}} {{$json[\"port\"]}}"
+      },
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        144,
+        80
+      ],
+      "id": "2471c9d4-04fb-4c5c-a17b-666892438ac2",
+      "name": "Check Port",
+      "executeOnce": false,
+      "alwaysOutputData": false,
+      "notesInFlow": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "result = []\n\nfor item in _input.all():\n    payload = item.json\n\n    result.append({\n        \"json\": {\n            \"result\": payload\n        }\n    })\n\nreturn result"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        -112
+      ],
+      "id": "8e5c2fd6-555a-4cb8-99cc-b816ec03616f",
+      "name": "Join Responses"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cf0f5bac-cd57-4e83-abc3-220b5162c891",
+              "name": "name",
+              "value": "={{ $('On-Prem IP/Port Connectivity').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "0060da00-c4a1-4665-a1cf-9841baf574b5",
+              "name": "stderr",
+              "value": "={{ $json.stderr }}",
+              "type": "string"
+            },
+            {
+              "id": "b1da890d-2882-4a1a-a004-9b877f97c444",
+              "name": "ip",
+              "value": "={{ $('On-Prem IP/Port Connectivity').item.json.ip }}",
+              "type": "string"
+            },
+            {
+              "id": "c0002edf-0a45-4fe5-8add-a3a848fda0a7",
+              "name": "port",
+              "value": "={{ $('On-Prem IP/Port Connectivity').item.json.port }}",
+              "type": "number"
+            },
+            {
+              "id": "98befafa-1141-47a9-a7e4-35d1c6a87270",
+              "name": "proxy",
+              "value": "={{ $('On-Prem IP/Port Connectivity').item.json.proxy }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        368,
+        80
+      ],
+      "id": "4d3221c7-7ffc-4700-95a2-ce635089925b",
+      "name": "Structure Results"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f5cbd10e-fd68-495a-a541-c1d605098ca9",
+              "name": "name",
+              "value": "={{ $('SaaS/API Connectivity').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "e8d7d927-29da-49bb-9e75-1410baf644a3",
+              "name": "url",
+              "value": "={{ $('SaaS/API Connectivity').item.json.url }}",
+              "type": "string"
+            },
+            {
+              "id": "c02304ed-d1c6-44c0-b91e-b6e3c4fabb1a",
+              "name": "results",
+              "value": "={{ $json.result }}",
+              "type": "object"
+            },
+            {
+              "id": "724e8a44-7d7f-4513-a833-d09f9d763f39",
+              "name": "display_results",
+              "value": "={{ $('SaaS/API Connectivity').item.json.display_results }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        368,
+        -112
+      ],
+      "id": "8f791e82-3311-4c0a-a1f3-178b25c6c6d8",
+      "name": "Structure Responses"
+    },
+    {
+      "parameters": {
+        "method": "={{ $json.method }}",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "specifyHeaders": "json",
+        "jsonHeaders": "={{ $json.headers.toJsonString() }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body.toJsonString() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -96,
+        -112
+      ],
+      "id": "d0aa2da5-75ce-4e08-aa78-edc77cc1629f",
+      "name": "cURL API",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://batman-ms-broadcast.batman-dev.svc.cluster.local/api/v1/Email/Send",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        -16
+      ],
+      "id": "3ceeb8a5-a193-45c3-825a-1dafbf39bec2",
+      "name": "Email Report"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        32
+      ],
+      "id": "d4192008-a704-438a-b981-ce7748678447",
+      "name": "When clicking ‘Execute workflow’"
+    }
+  ],
+  "connections": {
+    "On-Prem IP/Port Connectivity": {
+      "main": [
+        [
+          {
+            "node": "Check Port",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SaaS/API Connectivity": {
+      "main": [
+        [
+          {
+            "node": "cURL API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise API Response": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise Connectivity Response": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Check Port": {
+      "main": [
+        [
+          {
+            "node": "Structure Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Join Responses": {
+      "main": [
+        [
+          {
+            "node": "Structure Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structure Results": {
+      "main": [
+        [
+          {
+            "node": "Summarise Connectivity Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structure Responses": {
+      "main": [
+        [
+          {
+            "node": "Summarise API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "cURL API": {
+      "main": [
+        [
+          {
+            "node": "Join Responses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "SaaS/API Connectivity",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "On-Prem IP/Port Connectivity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "39bcf5362060bfa1153ff93d0e8b60dc64a70059aac3ab6c3926746bb8826830"
+  }
+}
